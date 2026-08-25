@@ -1,0 +1,161 @@
+# Purpose of this workflow:
+# On a push to main (or a manual trigger), submit an Argo Workflow to an ACK One
+# Argo workflow cluster. The Workflow clones this repo, builds the container image
+# with kaniko, and pushes it to Alibaba Cloud Container Registry (ACR EE).
+# This GitHub Actions file only renders and submits the Workflow CR, then waits
+# for the result; all build work happens inside the workflow cluster.
+#
+# To use this workflow, you will need to complete the following set-up steps:
+#
+# 1. Create an ACR EE instance and image repository.
+#    For instructions see https://www.alibabacloud.com/help/doc-detail/142168.htm
+#
+# 2. Create an ACK One Argo workflow cluster (容器Argo工作流集群).
+#    For instructions see https://csnew.console.aliyun.com/#/next/argowf
+#
+# 3. In the workflow cluster, pre-create the secrets the Workflow depends on:
+#      - acr-docker-secret : docker-registry secret with ACR EE push credentials
+#        (kubectl create secret docker-registry acr-docker-secret \
+#           --docker-server=<ACR_EE_REGISTRY> --docker-username=<user> --docker-password=<pwd>)
+#      - github-token      : (only for private repos) generic secret with a GitHub PAT
+#        (kubectl create secret generic github-token --from-literal=token=<ghp_xxx>)
+#
+# 4. Apply the ClusterWorkflowTemplate named `build-image` to the workflow cluster
+#    (git-checkout -> optional run-test -> kaniko build-push-image DAG).
+#
+# 5. Get the kubeconfig of the Argo workflow cluster (from the ACK console or
+#    DescribeClusterUserKubeconfig API) and store it in a GitHub Actions secret
+#    named `ARGO_CLUSTER_KUBECONFIG` (paste the file content as-is, not base64).
+#    NOTE: the workflow cluster API server must be reachable from GitHub-hosted
+#    runners, i.e. the cluster needs a public API endpoint.
+#    For instructions on setting up secrets see:
+#    https://developer.github.com/actions/managing-workflows/storing-secrets/
+#
+# 6. Change the values for WORKFLOW_NAMESPACE and ACR_EE_*.
+#
+# NOTE: copy this file to .github/workflows/argo-workflow-ci.yml in your repo.
+#
+
+name: Trigger Argo Workflow CI to ACR
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch: {}   # manual trigger, handy for demo
+
+# Environment variables available to all jobs and steps in this workflow.
+env:
+  # --- Argo workflow cluster (ACK One) ---
+  WORKFLOW_NAMESPACE: default
+  WORKFLOW_TEMPLATE: build-image          # ClusterWorkflowTemplate name created in step 4
+
+  # --- ACR EE: the push destination of the in-cluster kaniko step ---
+  ACR_EE_REGISTRY: demo-test2-registry.cn-hangzhou.cr.aliyuncs.com
+  ACR_EE_NAMESPACE: test
+  ACR_EE_IMAGE: echo-web-server
+  TAG: ${{ github.sha }}
+
+permissions:
+  contents: read
+
+jobs:
+  submit-argo-workflow:
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+
+    # 1. Set up kubeconfig of the Argo workflow cluster from the GitHub secret.
+    #    The kubeconfig is the only credential that enters GitHub; ACR and GitHub
+    #    tokens stay inside the cluster as Kubernetes secrets.
+    - name: Setup kubeconfig
+      run: |
+        mkdir -p ~/.kube
+        echo "${{ secrets.ARGO_CLUSTER_KUBECONFIG }}" > ~/.kube/config
+        chmod 600 ~/.kube/config
+
+    # 1.1 Smoke test: fail fast if the runner cannot reach the cluster API server.
+    - name: Verify cluster connectivity
+      run: kubectl cluster-info
+
+    # 2. Render and submit the Workflow CR.
+    #    This is the equivalent of the "EventBridge event target" in the official
+    #    event-driven CI case. Requirements inherited from that case:
+    #      - metadata.name must be explicit (no generateName);
+    #      - namespace must be declared even for default;
+    #      - parameters carry the GitHub context (repo URL, branch, SHA-based tag).
+    - name: Render & submit Workflow
+      env:
+        WF_NAME: build-image-${{ github.run_id }}-${{ github.run_attempt }}
+      run: |
+        cat <<EOF > workflow.yaml
+        apiVersion: argoproj.io/v1alpha1
+        kind: Workflow
+        metadata:
+          name: ${WF_NAME}
+          namespace: ${WORKFLOW_NAMESPACE}
+        spec:
+          ttlStrategy:
+            ttlSecondsAfterFinished: 86400
+          workflowTemplateRef:
+            name: ${WORKFLOW_TEMPLATE}
+            clusterScope: true
+          arguments:
+            parameters:
+              - name: repo_url
+                value: "${{ github.server_url }}/${{ github.repository }}.git"
+              - name: repo_name
+                value: "${{ github.event.repository.name }}"
+              - name: target_branch
+                value: "${{ github.ref_name }}"
+              - name: container_image
+                value: "${ACR_EE_REGISTRY}/${ACR_EE_NAMESPACE}/${ACR_EE_IMAGE}"
+              - name: container_tag
+                value: "${TAG}"
+              - name: dockerfile
+                value: ./Dockerfile
+              - name: enable_test
+                value: "true"
+        EOF
+        kubectl apply -f workflow.yaml
+        echo "submitted workflow: ${WF_NAME}"
+
+    # 3. Poll the Workflow status with kubectl until it finishes; maps workflow
+    #    success/failure to CI status (no argo CLI needed).
+    #    (The EventBridge variant is fire-and-forget; this gives you red/green builds.)
+    - name: Wait for workflow completion
+      env:
+        WF_NAME: build-image-${{ github.run_id }}-${{ github.run_attempt }}
+      run: |
+        TIMEOUT=1800   # 30 minutes
+        ELAPSED=0
+        while true; do
+          PHASE=$(kubectl get workflow "${WF_NAME}" -n "${WORKFLOW_NAMESPACE}" \
+            -o jsonpath='{.status.phase}' 2>/dev/null)
+          case "${PHASE}" in
+            Succeeded)
+              echo "workflow ${WF_NAME} succeeded"
+              break
+              ;;
+            Failed|Error)
+              echo "workflow ${WF_NAME} finished with phase: ${PHASE}"
+              kubectl get workflow "${WF_NAME}" -n "${WORKFLOW_NAMESPACE}" -o yaml
+              exit 1
+              ;;
+          esac
+          if [ "${ELAPSED}" -ge "${TIMEOUT}" ]; then
+            echo "timed out waiting for workflow ${WF_NAME} (phase: ${PHASE:-unknown})"
+            exit 1
+          fi
+          echo "phase: ${PHASE:-Pending}, waiting... (${ELAPSED}s/${TIMEOUT}s)"
+          sleep 10
+          ELAPSED=$((ELAPSED + 10))
+        done
+
+    # 4. Print the deliverable for easy copy/paste and demo walkthrough.
+    - name: Print result
+      env:
+        WF_NAME: build-image-${{ github.run_id }}-${{ github.run_attempt }}
+      run: |
+        echo "image pushed: ${ACR_EE_REGISTRY}/${ACR_EE_NAMESPACE}/${ACR_EE_IMAGE}:${TAG}"
+        kubectl get workflow "${WF_NAME}" -n "${WORKFLOW_NAMESPACE}" -o wide
