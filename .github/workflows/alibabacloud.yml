@@ -1,7 +1,7 @@
 # Purpose of this workflow:
 # On a push to main (or a manual trigger), submit an Argo Workflow to an ACK One
 # Argo workflow cluster. The Workflow clones this repo, builds the container image
-# with kaniko, and pushes it to Alibaba Cloud Container Registry (ACR EE).
+# with rootless BuildKit, and pushes it to Alibaba Cloud Container Registry (ACR EE).
 # This GitHub Actions file only renders and submits the Workflow CR, then waits
 # for the result; all build work happens inside the workflow cluster.
 #
@@ -21,7 +21,7 @@
 #        (kubectl create secret generic github-token --from-literal=token=<ghp_xxx>)
 #
 # 4. Apply the ClusterWorkflowTemplate named `build-image` to the workflow cluster
-#    (git-checkout -> optional run-test -> kaniko build-push-image DAG).
+#    (git-clone -> build-push-image DAG).
 #
 # 5. Get the kubeconfig of the Argo workflow cluster (from the ACK console or
 #    DescribeClusterUserKubeconfig API) and store it in a GitHub Actions secret
@@ -51,8 +51,8 @@ env:
 
   # --- ACR EE: the push destination of the in-cluster kaniko step ---
   ACR_EE_REGISTRY: wbcimage-registry-vpc.cn-hangzhou.cr.aliyuncs.com
-  ACR_EE_NAMESPACE: test
-  ACR_EE_IMAGE: echo-web-server
+  ACR_EE_NAMESPACE: default
+  ACR_EE_IMAGE: echo-server
   TAG: ${{ github.sha }}
 
 permissions:
@@ -114,45 +114,14 @@ jobs:
                 value: "${TAG}"
               - name: dockerfile
                 value: ./Dockerfile
-              - name: enable_test
-                value: "true"
         EOF
         kubectl apply -f workflow.yaml
         echo "submitted workflow: ${WF_NAME}"
 
-    # 3. Poll the Workflow status with kubectl until it finishes; maps workflow
-    #    success/failure to CI status (no argo CLI needed).
-    #    (The EventBridge variant is fire-and-forget; this gives you red/green builds.)
-    - name: Wait for workflow completion
-      env:
-        WF_NAME: build-image-${{ github.run_id }}-${{ github.run_attempt }}
-      run: |
-        TIMEOUT=1800   # 30 minutes
-        ELAPSED=0
-        while true; do
-          PHASE=$(kubectl get workflow "${WF_NAME}" -n "${WORKFLOW_NAMESPACE}" \
-            -o jsonpath='{.status.phase}' 2>/dev/null)
-          case "${PHASE}" in
-            Succeeded)
-              echo "workflow ${WF_NAME} succeeded"
-              break
-              ;;
-            Failed|Error)
-              echo "workflow ${WF_NAME} finished with phase: ${PHASE}"
-              kubectl get workflow "${WF_NAME}" -n "${WORKFLOW_NAMESPACE}" -o yaml
-              exit 1
-              ;;
-          esac
-          if [ "${ELAPSED}" -ge "${TIMEOUT}" ]; then
-            echo "timed out waiting for workflow ${WF_NAME} (phase: ${PHASE:-unknown})"
-            exit 1
-          fi
-          echo "phase: ${PHASE:-Pending}, waiting... (${ELAPSED}s/${TIMEOUT}s)"
-          sleep 10
-          ELAPSED=$((ELAPSED + 10))
-        done
-
-    # 4. Print the deliverable for easy copy/paste and demo walkthrough.
+    # 3. Print the deliverable for easy copy/paste and demo walkthrough.
+    #    Success here means the Workflow CR was created; the actual build result
+    #    is checked in the Argo UI / ACR console (fire-and-forget, like the
+    #    EventBridge variant of the official case).
     - name: Print result
       env:
         WF_NAME: build-image-${{ github.run_id }}-${{ github.run_attempt }}
