@@ -1,0 +1,126 @@
+# This workflow will build and push a new container image to Alibaba Cloud Container Registry (ACR),
+# and then will deploy it to Alibaba Cloud Container Service for Kubernetes (ACK), when there is a push to the "main" branch.
+#
+# To use this workflow, you will need to complete the following set-up steps:
+#
+# 1. Create an ACR repository to store your container images.
+#    You can use ACR EE instance for more security and better performance.
+#    For instructions see https://www.alibabacloud.com/help/doc-detail/142168.htm
+#
+# 2. Create an ACK cluster to run your containerized application.
+#    You can use ACK Pro cluster for more security and better performance.
+#    For instructions see https://www.alibabacloud.com/help/doc-detail/95108.htm
+#
+# 3. Store your AccessKey pair in GitHub Actions secrets named `ACCESS_KEY_ID` and `ACCESS_KEY_SECRET`.
+#    For instructions on setting up secrets see: https://developer.github.com/actions/managing-workflows/storing-secrets/
+#
+# 4. Change the values for the ACK_CLUSTER_ID, CLUSTER_TYPE, WORKFLOW_NAMESPACE, WORKFLOW_TEMPLATE, ACR_EE_REGISTRY, ACR_EE_NAMESPACE, and ACR_EE_IMAGE.
+#
+# NOTE: copy this file to .github/workflows/argo-workflow-ci.yml in your repo.
+#
+
+name: Trigger Argo Workflow CI to ACR
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch: {}   # manual trigger, handy for demo
+
+# Environment variables available to all jobs and steps in this workflow.
+env:
+  # --- Argo workflow cluster (ACK One) ---
+  ACK_CLUSTER_ID: cf5f903e68e204bfd92357e7a4f274637          # ID of the Argo workflow cluster
+  CLUSTER_TYPE: ACKOne
+  WORKFLOW_NAMESPACE: default
+  WORKFLOW_TEMPLATE: ci-go-v1           # pre-installed ClusterWorkflowTemplate
+
+  # --- ACR EE: the push destination of the in-cluster kaniko step ---
+  ACR_EE_REGISTRY: imagetest-registry.cn-hongkong.cr.aliyuncs.com
+  ACR_EE_NAMESPACE: acs
+  ACR_EE_IMAGE: echo-server
+  TAG: ${{ github.sha }}
+
+permissions:
+  contents: read
+
+jobs:
+  submit-argo-workflow:
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+
+    # 1. Set K8s context of the Argo workflow cluster.
+    #    Same approach as the argo-cd / ci.yaml example: the action exchanges the
+    #    AccessKey pair for a fresh kubeconfig of `ACK_CLUSTER_ID` at runtime and
+    #    writes it to ~/.kube/config. Advantage over a static kubeconfig secret:
+    #    no long-lived cluster credential stored in GitHub, and the kubeconfig can
+    #    be invalidated by rotating the AccessKey.
+    - name: Set context
+      uses: aliyun/ack-set-context@v1.1
+      with:
+        cluster-type: "${{ env.CLUSTER_TYPE }}"
+        access-key-id: "${{ secrets.ACCESS_KEY_ID }}"
+        access-key-secret: "${{ secrets.ACCESS_KEY_SECRET }}"
+        cluster-id: "${{ env.ACK_CLUSTER_ID }}"
+
+    # 1.1 Smoke test: fail fast if the runner cannot reach the cluster API server.
+    - name: Verify cluster connectivity
+      run: kubectl cluster-info
+
+    # 2. Render and submit the Workflow CR.
+    #    This is the equivalent of the "EventBridge event target" in the official
+    #    event-driven CI case. Requirements inherited from that case:
+    #      - metadata.name must be explicit (no generateName);
+    #      - namespace must be declared even for default;
+    #      - parameters carry the GitHub context (repo URL, branch, SHA-based tag).
+    - name: Render & submit Workflow
+      env:
+        WF_NAME: build-image-${{ github.run_id }}-${{ github.run_attempt }}
+      run: |
+        cat <<EOF > workflow.yaml
+        apiVersion: argoproj.io/v1alpha1
+        kind: Workflow
+        metadata:
+          name: ${WF_NAME}
+          namespace: ${WORKFLOW_NAMESPACE}
+        spec:
+          ttlStrategy:
+            ttlSecondsAfterFinished: 86400
+          workflowTemplateRef:
+            name: ${WORKFLOW_TEMPLATE}
+            clusterScope: true
+          arguments:
+            parameters:
+              - name: repo_url
+                value: "${{ github.server_url }}/${{ github.repository }}.git"
+              - name: repo_name
+                value: "${{ github.event.repository.name }}"
+              - name: target_branch
+                value: "${{ github.ref_name }}"
+              - name: container_image
+                value: "${ACR_EE_REGISTRY}/${ACR_EE_NAMESPACE}/${ACR_EE_IMAGE}"
+              - name: container_tag
+                value: "${TAG}"
+              - name: dockerfile
+                value: ./Dockerfile
+              - name: enable_suffix_commitid
+                value: "false"
+              - name: enable_test
+                value: "false"
+              - name: enable_goproxy
+                value: "false"
+        EOF
+        kubectl apply -f workflow.yaml
+        echo "submitted workflow: ${WF_NAME}"
+
+    # 3. Print the deliverable for easy copy/paste and demo walkthrough.
+    #    Success here means the Workflow CR was created; the actual build result
+    #    is checked in the Argo UI / ACR console (fire-and-forget, like the
+    #    EventBridge variant of the official case).
+    - name: Print result
+      env:
+        WF_NAME: build-image-${{ github.run_id }}-${{ github.run_attempt }}
+      run: |
+        echo "image pushed: ${ACR_EE_REGISTRY}/${ACR_EE_NAMESPACE}/${ACR_EE_IMAGE}:${TAG}"
+        kubectl get workflow "${WF_NAME}" -n "${WORKFLOW_NAMESPACE}" -o wide
