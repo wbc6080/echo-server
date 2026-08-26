@@ -129,14 +129,14 @@ jobs:
 
         # Build the Argo UI link for this workflow
         set -e
-        ARGO_SVC=$(kubectl get svc argo-server -n "${WORKFLOW_NAMESPACE}" \
-          -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-        ARGO_PORT=$(kubectl get svc argo-server -n "${WORKFLOW_NAMESPACE}" \
-          -o jsonpath='{.spec.ports[?(@.name=="web")].port}')
+        ARGO_SVC=$(kubectl get svc argo-server -A \
+          -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}')
+        ARGO_PORT=$(kubectl get svc argo-server -A \
+          -o jsonpath='{.items[0].spec.ports[?(@.name=="web")].port}')
         # fall back to the first port if the web port name is absent
         if [ -z "${ARGO_PORT}" ]; then
-          ARGO_PORT=$(kubectl get svc argo-server -n "${WORKFLOW_NAMESPACE}" \
-            -o jsonpath='{.spec.ports[0].port}')
+          ARGO_PORT=$(kubectl get svc argo-server -A \
+            -o jsonpath='{.items[0].spec.ports[0].port}')
         fi
         echo ""
         echo "Argo UI: https://${ARGO_SVC}:${ARGO_PORT}/workflows/${WORKFLOW_NAMESPACE}/${WF_NAME}"
