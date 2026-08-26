@@ -56,7 +56,7 @@ jobs:
     #    writes it to ~/.kube/config. Advantage over a static kubeconfig secret:
     #    no long-lived cluster credential stored in GitHub, and the kubeconfig can
     #    be invalidated by rotating the AccessKey.
-    - name: Set context
+    - name: Set Context
       uses: aliyun/ack-set-context@v1.1
       with:
         cluster-type: "${{ env.CLUSTER_TYPE }}"
@@ -65,7 +65,7 @@ jobs:
         cluster-id: "${{ env.ACK_CLUSTER_ID }}"
 
     # 1.1 Smoke test: fail fast if the runner cannot reach the cluster API server.
-    - name: Verify cluster connectivity
+    - name: Verify Cluster Connectivity
       run: kubectl cluster-info
 
     # 2. Render and submit the Workflow CR.
@@ -74,7 +74,7 @@ jobs:
     #      - metadata.name must be explicit (no generateName);
     #      - namespace must be declared even for default;
     #      - parameters carry the GitHub context (repo URL, branch, SHA-based tag).
-    - name: Render & submit Workflow
+    - name: Render & Submit Workflow
       env:
         WF_NAME: build-image-${{ github.run_id }}-${{ github.run_attempt }}
       run: |
@@ -118,11 +118,12 @@ jobs:
     #    Success here means the Workflow CR was created; the actual build result
     #    is checked in the Argo UI / ACR console (fire-and-forget, like the
     #    EventBridge variant of the official case).
-    - name: Print result
+    - name: Print Result
       env:
         WF_NAME: build-image-${{ github.run_id }}-${{ github.run_attempt }}
       run: |
-        echo "image pushed: ${ACR_EE_REGISTRY}/${ACR_EE_NAMESPACE}/${ACR_EE_IMAGE}:${TAG}"
+        echo "image push in progress: ${ACR_EE_REGISTRY}/${ACR_EE_NAMESPACE}/${ACR_EE_IMAGE}:${TAG}"
+        echo "track the build/push progress of this workflow in the Argo UI link below"
         kubectl get workflow "${WF_NAME}" -n "${WORKFLOW_NAMESPACE}" -o wide
 
         # Build the Argo UI link for this workflow
