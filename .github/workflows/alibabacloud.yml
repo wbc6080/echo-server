@@ -14,14 +14,13 @@
 #    For instructions see https://csnew.console.aliyun.com/#/next/argowf
 #
 # 3. In the workflow cluster, pre-create the secrets the Workflow depends on:
-#      - acr-docker-secret : docker-registry secret with ACR EE push credentials
-#        (kubectl create secret docker-registry acr-docker-secret \
-#           --docker-server=<ACR_EE_REGISTRY> --docker-username=<user> --docker-password=<pwd>)
-#      - github-token      : (only for private repos) generic secret with a GitHub PAT
+#      - docker-config : ACR EE access credential, key `config.json`
+#        (kubectl create secret generic docker-config --from-literal="config.json={\"auths\": {\"<ACR_EE_REGISTRY>\": {\"auth\": \"$(echo -n USER:PASSWORD | base64)\"}}}")
+#      - github-token  : (only for private repos) generic secret with a GitHub PAT
 #        (kubectl create secret generic github-token --from-literal=token=<ghp_xxx>)
 #
-# 4. Apply the ClusterWorkflowTemplate named `build-image` to the workflow cluster
-#    (git-clone -> build-push-image DAG).
+# 4. Apply the ClusterWorkflowTemplate named `build-image2` to the workflow cluster
+#    (git-checkout-pr -> build-push-image DAG, NAS-backed workdir).
 #
 # 5. Get the kubeconfig of the Argo workflow cluster (from the ACK console or
 #    DescribeClusterUserKubeconfig API) and store it in a GitHub Actions secret
@@ -47,7 +46,7 @@ on:
 env:
   # --- Argo workflow cluster (ACK One) ---
   WORKFLOW_NAMESPACE: default
-  WORKFLOW_TEMPLATE: build-image          # ClusterWorkflowTemplate name created in step 4
+  WORKFLOW_TEMPLATE: build-image2         # ClusterWorkflowTemplate name created in step 4
 
   # --- ACR EE: the push destination of the in-cluster kaniko step ---
   ACR_EE_REGISTRY: wbcimage-registry-vpc.cn-hangzhou.cr.aliyuncs.com
