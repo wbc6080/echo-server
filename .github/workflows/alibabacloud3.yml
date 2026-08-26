@@ -1,0 +1,200 @@
+# This workflow will build and push a new container image to Alibaba Cloud Container Registry (ACR),
+# and then will deploy it to Alibaba Cloud Container Service for Kubernetes (ACK), when there is a push to the "main" branch.
+#
+# V3 improvement over the V2 base `argo-workflow`: the ACR EE access credential (username/password) is stored
+# in GitHub secrets (ACR_EE_USERNAME / ACR_EE_PASSWORD) and provisioned into the workflow cluster
+# as the `docker-config` Secret on every run, right before the Workflow is submitted. The manual
+# in-cluster secret creation (步骤一 of the official use case below) is no longer needed.
+# Official use case: https://help.aliyun.com/zh/ack/ack-argo-workflow-cluster/use-cases/use-workflow-clusters-to-build-a-ci-pipeline-for-go-projects
+#
+# To use this workflow, you will need to complete the following set-up steps:
+#
+# 1. Create an ACR EE instance and a repository to store your container images, then obtain an
+#    access credential (username/password) of the instance.
+#    For instructions see https://www.alibabacloud.com/help/doc-detail/142168.htm
+#
+# 2. Create an Argo workflow cluster (ACK One) to run the Workflow, and make sure the
+#    ClusterWorkflowTemplate referenced by WORKFLOW_TEMPLATE exists (e.g. the pre-installed ci-go-v1).
+#
+# 3. Store your AccessKey pair in GitHub Actions secrets named `ACCESS_KEY_ID` and `ACCESS_KEY_SECRET`.
+#    For instructions on setting up secrets see: https://developer.github.com/actions/managing-workflows/storing-secrets/
+#
+# 4. Store the ACR EE access credential in GitHub Actions secrets named `ACR_EE_USERNAME` and `ACR_EE_PASSWORD`.
+#
+# 5. Change the values for the ACK_CLUSTER_ID, CLUSTER_TYPE, WORKFLOW_NAMESPACE, WORKFLOW_TEMPLATE, ACR_EE_REGISTRY, ACR_EE_NAMESPACE, and ACR_EE_IMAGE.
+#
+# NOTE: copy this file to .github/workflows/argo-workflow-ci-v3.yml in your repo.
+#
+
+name: Trigger Argo Workflow CI to ACR V3
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch: {}   # manual trigger, handy for demo
+
+# Environment variables available to all jobs and steps in this workflow.
+env:
+  # --- Argo workflow cluster (ACK One) ---
+  ACK_CLUSTER_ID: cf5f903e68e204bfd92357e7a4f274637          # ID of the Argo workflow cluster
+  CLUSTER_TYPE: One
+  WORKFLOW_NAMESPACE: default
+  WORKFLOW_TEMPLATE: ci-go-v1           # pre-installed ClusterWorkflowTemplate
+
+  # --- ACR EE: the push destination of the in-cluster buildkit step ---
+  ACR_EE_REGISTRY: imagetest-registry.cn-hongkong.cr.aliyuncs.com
+  ACR_EE_NAMESPACE: acs
+  ACR_EE_IMAGE: echo-server
+  # Name of the Secret that carries the ACR credential. Must match the secretName mounted by
+  # WORKFLOW_TEMPLATE (the pre-installed ci-go-v1 hardcodes `docker-config`).
+  ACR_SECRET_NAME: docker-config
+  TAG: ${{ github.sha }}
+
+permissions:
+  contents: read
+
+jobs:
+  submit-argo-workflow:
+    runs-on: ubuntu-latest
+    environment: production
+
+    steps:
+
+    # 1. Set K8s context of the Argo workflow cluster.
+    #    Same approach as the argo-cd / ci.yaml example: the action exchanges the
+    #    AccessKey pair for a fresh kubeconfig of `ACK_CLUSTER_ID` at runtime and
+    #    writes it to ~/.kube/config. Advantage over a static kubeconfig secret:
+    #    no long-lived cluster credential stored in GitHub, and the kubeconfig can
+    #    be invalidated by rotating the AccessKey.
+    - name: Set Context
+      uses: aliyun/ack-set-context@v1.1
+      with:
+        cluster-type: "${{ env.CLUSTER_TYPE }}"
+        access-key-id: "${{ secrets.ACCESS_KEY_ID }}"
+        access-key-secret: "${{ secrets.ACCESS_KEY_SECRET }}"
+        cluster-id: "${{ env.ACK_CLUSTER_ID }}"
+
+    # 1.1 Smoke test: fail fast if the runner cannot reach the cluster API server.
+    - name: Verify Cluster Connectivity
+      run: kubectl cluster-info
+
+    # 2. Provision the ACR credential Secret in the workflow namespace (the V3 step).
+    #    Automates 步骤一 of the official use case: instead of running
+    #    `kubectl create secret generic docker-config --from-literal=...` by hand,
+    #    the ACR EE username/password come from GitHub secrets and are pushed into
+    #    the cluster on every run, right before the Workflow is submitted.
+    #      - The Secret must be named `docker-config` and carry a `config.json` key:
+    #        ci-go-v1 mounts it at /.docker with DOCKER_CONFIG=/.docker, so buildkit
+    #        reads /.docker/config.json when pushing.
+    #      - The registry domain inside config.json is ACR_EE_REGISTRY, the same env
+    #        var used to assemble container_image, so credential and push target can
+    #        never drift apart (a mismatched manual secret fails the push with
+    #        `insufficient_scope: authorization failed`).
+    #      - `--dry-run=client -o yaml | kubectl apply -f -` is idempotent: the first
+    #        run creates the Secret, later runs refresh it, so rotated ACR
+    #        credentials take effect on the next run without manual cleanup.
+    #      - The credential only exists in a pipe between the two kubectl processes
+    #        and in a temp file (docker-config.json) deleted right afterwards; nothing is logged.
+    - name: Provision ACR Credential Secret
+      env:
+        ACR_EE_USERNAME: ${{ secrets.ACR_EE_USERNAME }}
+        ACR_EE_PASSWORD: ${{ secrets.ACR_EE_PASSWORD }}
+      run: |
+        set -euo pipefail
+
+        if [ -z "$ACR_EE_USERNAME" ] || [ -z "$ACR_EE_PASSWORD" ]; then
+          echo "::error::GitHub secrets ACR_EE_USERNAME / ACR_EE_PASSWORD are not set. Add them under Settings -> Secrets and variables -> Actions."
+          exit 1
+        fi
+
+        # Docker config.json consumed by buildkit, same format as the manual
+        # `kubectl create secret` in the official use case. The temp file is named
+        # docker-config.json (after the Secret it feeds) on purpose, so the
+        # --from-file=<key>=<path> syntax below shows two clearly distinct names:
+        # the key must stay config.json (what buildkit reads at /.docker/config.json),
+        # the file is only the local source.
+        AUTH=$(printf '%s:%s' "$ACR_EE_USERNAME" "$ACR_EE_PASSWORD" | base64 | tr -d '\n')
+        jq -n --arg registry "$ACR_EE_REGISTRY" --arg auth "$AUTH" \
+          '{auths: {($registry): {auth: $auth}}}' > docker-config.json
+
+        kubectl create secret generic "${ACR_SECRET_NAME}" \
+          --from-file=config.json=docker-config.json \
+          --namespace "${WORKFLOW_NAMESPACE}" \
+          --dry-run=client -o yaml | kubectl apply -f -
+
+        rm -f docker-config.json
+        echo "ACR credential secret '${ACR_SECRET_NAME}' is ready in namespace ${WORKFLOW_NAMESPACE}"
+
+    # 3. Render and submit the Workflow CR.
+    #    This is the equivalent of the "EventBridge event target" in the official
+    #    event-driven CI case. Requirements inherited from that case:
+    #      - metadata.name must be explicit (no generateName);
+    #      - namespace must be declared even for default;
+    #      - parameters carry the GitHub context (repo URL, branch, SHA-based tag).
+    - name: Render & Submit Workflow
+      env:
+        WF_NAME: build-image-${{ github.run_id }}-${{ github.run_attempt }}
+      run: |
+        cat <<EOF > workflow.yaml
+        apiVersion: argoproj.io/v1alpha1
+        kind: Workflow
+        metadata:
+          name: ${WF_NAME}
+          namespace: ${WORKFLOW_NAMESPACE}
+        spec:
+          ttlStrategy:
+            ttlSecondsAfterFinished: 86400
+          workflowTemplateRef:
+            name: ${WORKFLOW_TEMPLATE}
+            clusterScope: true
+          arguments:
+            parameters:
+              - name: repo_url
+                value: "${{ github.server_url }}/${{ github.repository }}.git"
+              - name: repo_name
+                value: "${{ github.event.repository.name }}"
+              - name: target_branch
+                value: "${{ github.ref_name }}"
+              - name: container_image
+                value: "${ACR_EE_REGISTRY}/${ACR_EE_NAMESPACE}/${ACR_EE_IMAGE}"
+              - name: container_tag
+                value: "${TAG}"
+              - name: dockerfile
+                value: ./Dockerfile
+              - name: enable_suffix_commitid
+                value: "false"
+              - name: enable_test
+                value: "false"
+              - name: enable_goproxy
+                value: "false"
+        EOF
+        kubectl apply -f workflow.yaml
+        echo "submitted workflow: ${WF_NAME}"
+
+    # 4. Print the deliverable for easy copy/paste and demo walkthrough.
+    #    Success here means the Workflow CR was created; the actual build result
+    #    is checked in the Argo UI / ACR console (fire-and-forget, like the
+    #    EventBridge variant of the official case).
+    - name: Print Result
+      env:
+        WF_NAME: build-image-${{ github.run_id }}-${{ github.run_attempt }}
+      run: |
+        echo "image push in progress: ${ACR_EE_REGISTRY}/${ACR_EE_NAMESPACE}/${ACR_EE_IMAGE}:${TAG}"
+        echo "track the build/push progress of this workflow in the Argo UI link below"
+        kubectl get workflow "${WF_NAME}" -n "${WORKFLOW_NAMESPACE}" -o wide
+
+        # Build the Argo UI link for this workflow
+        set -e
+        ARGO_SVC=$(kubectl get svc -A --field-selector metadata.name=argo-server \
+          -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}')
+        ARGO_PORT=$(kubectl get svc -A --field-selector metadata.name=argo-server \
+          -o jsonpath='{.items[0].spec.ports[?(@.name=="web")].port}')
+        # fall back to the first port if the web port name is absent
+        if [ -z "${ARGO_PORT}" ]; then
+          ARGO_PORT=$(kubectl get svc -A --field-selector metadata.name=argo-server \
+            -o jsonpath='{.items[0].spec.ports[0].port}')
+        fi
+        echo ""
+        echo "Argo UI: https://${ARGO_SVC}:${ARGO_PORT}/workflows/${WORKFLOW_NAMESPACE}/${WF_NAME}"
+        echo "NOTE: if ${ARGO_SVC} is a private IP, the link only works inside the VPC;"
+        echo "      enable public access via the Argo workflow cluster console otherwise."
