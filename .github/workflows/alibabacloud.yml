@@ -22,16 +22,15 @@
 # 4. Apply the ClusterWorkflowTemplate named `build-image2` to the workflow cluster
 #    (git-checkout-pr -> build-push-image DAG, NAS-backed workdir).
 #
-# 5. Store your AccessKey pair in GitHub Actions secrets named `ACCESS_KEY_ID`
-#    and `ACCESS_KEY_SECRET`. The RAM user needs permissions to describe the
-#    workflow cluster and generate its kubeconfig (e.g. AliyunAdcpFullAccess,
-#    or scoped ACK One / workflow cluster read + DescribeClusterUserKubeconfig).
-#    The action calls the OpenAPI with the AccessKey to fetch a fresh kubeconfig
-#    for `ACK_CLUSTER_ID` at runtime -- no static kubeconfig is stored in GitHub.
+# 5. Get the kubeconfig of the Argo workflow cluster (from the ACK console or
+#    DescribeClusterUserKubeconfig API) and store it in a GitHub Actions secret
+#    named `ARGO_CLUSTER_KUBECONFIG` (paste the file content as-is, not base64).
+#    NOTE: the workflow cluster API server must be reachable from GitHub-hosted
+#    runners, i.e. the cluster needs a public API endpoint.
 #    For instructions on setting up secrets see:
 #    https://developer.github.com/actions/managing-workflows/storing-secrets/
 #
-# 6. Change the values for ACK_CLUSTER_ID, WORKFLOW_NAMESPACE and ACR_EE_*.
+# 6. Change the values for WORKFLOW_NAMESPACE and ACR_EE_*.
 #
 # NOTE: copy this file to .github/workflows/argo-workflow-ci.yml in your repo.
 #
@@ -46,10 +45,8 @@ on:
 # Environment variables available to all jobs and steps in this workflow.
 env:
   # --- Argo workflow cluster (ACK One) ---
-  ACK_CLUSTER_ID: cf5f903e68e204bfd92357e7a4f274637          # ID of the Argo workflow cluster
-  CLUSTER_TYPE: ACKOne
   WORKFLOW_NAMESPACE: default
-  WORKFLOW_TEMPLATE: ci-go-v1         # ClusterWorkflowTemplate name
+  WORKFLOW_TEMPLATE: build-image2         # ClusterWorkflowTemplate name created in step 4
 
   # --- ACR EE: the push destination of the in-cluster kaniko step ---
   ACR_EE_REGISTRY: imagetest-registry.cn-hongkong.cr.aliyuncs.com
@@ -67,19 +64,14 @@ jobs:
 
     steps:
 
-    # 1. Set K8s context of the Argo workflow cluster.
-    #    Same approach as the argo-cd / ci.yaml example: the action exchanges the
-    #    AccessKey pair for a fresh kubeconfig of `ACK_CLUSTER_ID` at runtime and
-    #    writes it to ~/.kube/config. Advantage over a static kubeconfig secret:
-    #    no long-lived cluster credential stored in GitHub, and the kubeconfig can
-    #    be invalidated by rotating the AccessKey.
-    - name: Set context
-      uses: aliyun/ack-set-context@v1.1
-      with:
-        cluster-type: "${{ env.CLUSTER_TYPE }}"
-        access-key-id: "${{ secrets.ACCESS_KEY_ID }}"
-        access-key-secret: "${{ secrets.ACCESS_KEY_SECRET }}"
-        cluster-id: "${{ env.ACK_CLUSTER_ID }}"
+    # 1. Set up kubeconfig of the Argo workflow cluster from the GitHub secret.
+    #    The kubeconfig is the only credential that enters GitHub; ACR and GitHub
+    #    tokens stay inside the cluster as Kubernetes secrets.
+    - name: Setup kubeconfig
+      run: |
+        mkdir -p ~/.kube
+        echo "${{ secrets.ARGO_CLUSTER_KUBECONFIG }}" > ~/.kube/config
+        chmod 600 ~/.kube/config
 
     # 1.1 Smoke test: fail fast if the runner cannot reach the cluster API server.
     - name: Verify cluster connectivity
