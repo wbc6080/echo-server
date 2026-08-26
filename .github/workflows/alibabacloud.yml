@@ -49,8 +49,8 @@ env:
   WORKFLOW_TEMPLATE: build-image2         # ClusterWorkflowTemplate name created in step 4
 
   # --- ACR EE: the push destination of the in-cluster kaniko step ---
-  ACR_EE_REGISTRY: wbcimage-registry-vpc.cn-hangzhou.cr.aliyuncs.com
-  ACR_EE_NAMESPACE: default
+  ACR_EE_REGISTRY: imagetest-registry.cn-hongkong.cr.aliyuncs.com
+  ACR_EE_NAMESPACE: acs
   ACR_EE_IMAGE: echo-server
   TAG: ${{ github.sha }}
 
