@@ -56,8 +56,6 @@ jobs:
     #    writes it to ~/.kube/config. Advantage over a static kubeconfig secret:
     #    no long-lived cluster credential stored in GitHub, and the kubeconfig can
     #    be invalidated by rotating the AccessKey.
-    - name: Checkout
-      uses: actions/checkout@v3
     - name: Set context
       uses: aliyun/ack-set-context@v1.1
       with:
@@ -129,13 +127,13 @@ jobs:
 
         # Build the Argo UI link for this workflow
         set -e
-        ARGO_SVC=$(kubectl get svc argo-server -A \
+        ARGO_SVC=$(kubectl get svc -A --field-selector metadata.name=argo-server \
           -o jsonpath='{.items[0].status.loadBalancer.ingress[0].ip}')
-        ARGO_PORT=$(kubectl get svc argo-server -A \
+        ARGO_PORT=$(kubectl get svc -A --field-selector metadata.name=argo-server \
           -o jsonpath='{.items[0].spec.ports[?(@.name=="web")].port}')
         # fall back to the first port if the web port name is absent
         if [ -z "${ARGO_PORT}" ]; then
-          ARGO_PORT=$(kubectl get svc argo-server -A \
+          ARGO_PORT=$(kubectl get svc -A --field-selector metadata.name=argo-server \
             -o jsonpath='{.items[0].spec.ports[0].port}')
         fi
         echo ""
