@@ -126,3 +126,19 @@ jobs:
       run: |
         echo "image pushed: ${ACR_EE_REGISTRY}/${ACR_EE_NAMESPACE}/${ACR_EE_IMAGE}:${TAG}"
         kubectl get workflow "${WF_NAME}" -n "${WORKFLOW_NAMESPACE}" -o wide
+
+        # Build the Argo UI link for this workflow
+        set -e
+        ARGO_SVC=$(kubectl get svc argo-server -n "${WORKFLOW_NAMESPACE}" \
+          -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+        ARGO_PORT=$(kubectl get svc argo-server -n "${WORKFLOW_NAMESPACE}" \
+          -o jsonpath='{.spec.ports[?(@.name=="web")].port}')
+        # fall back to the first port if the web port name is absent
+        if [ -z "${ARGO_PORT}" ]; then
+          ARGO_PORT=$(kubectl get svc argo-server -n "${WORKFLOW_NAMESPACE}" \
+            -o jsonpath='{.spec.ports[0].port}')
+        fi
+        echo ""
+        echo "Argo UI: https://${ARGO_SVC}:${ARGO_PORT}/workflows/${WORKFLOW_NAMESPACE}/${WF_NAME}"
+        echo "NOTE: if ${ARGO_SVC} is a private IP, the link only works inside the VPC;"
+        echo "      enable public access via the Argo workflow cluster console otherwise."
