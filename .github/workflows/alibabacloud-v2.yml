@@ -19,7 +19,7 @@
 # NOTE: copy this file to .github/workflows/argo-workflow-ci.yml in your repo.
 #
 
-name: Trigger Argo Workflow CI to ACR
+name: Trigger Argo Workflow CI to ACR V2
 
 on:
   push:
@@ -30,7 +30,7 @@ on:
 env:
   # --- Argo workflow cluster (ACK One) ---
   ACK_CLUSTER_ID: cf5f903e68e204bfd92357e7a4f274637          # ID of the Argo workflow cluster
-  CLUSTER_TYPE: ACKOne
+  CLUSTER_TYPE: One
   WORKFLOW_NAMESPACE: default
   WORKFLOW_TEMPLATE: ci-go-v1           # pre-installed ClusterWorkflowTemplate
 
@@ -56,6 +56,8 @@ jobs:
     #    writes it to ~/.kube/config. Advantage over a static kubeconfig secret:
     #    no long-lived cluster credential stored in GitHub, and the kubeconfig can
     #    be invalidated by rotating the AccessKey.
+    - name: Checkout
+      uses: actions/checkout@v3
     - name: Set context
       uses: aliyun/ack-set-context@v1.1
       with:
